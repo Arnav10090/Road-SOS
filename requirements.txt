@@ -1,0 +1,26 @@
+# RoadSoS - National Road Safety Hackathon 2026
+# Core Requirements
+
+# Geospatial stack (offline spatial queries)
+geopandas>=1.0.0
+shapely>=2.0.0
+pyproj>=3.6.0
+
+# Database and vector search
+# sqlite3 is part of Python stdlib - no install needed
+# sqlite-vec extension: pip install sqlite-vec (optional, enables semantic search)
+
+# AI / SLM integration
+# Ollama runs separately: https://ollama.ai
+# No pip install needed for Ollama client (uses urllib)
+
+# API server (optional)
+flask>=3.0.0
+
+# Data processing
+requests>=2.31.0
+
+# Standard library only for core functionality - no heavy dependencies
+# The following are OPTIONAL enhancements:
+# sentence-transformers>=2.2.0  # For generating embeddings locally
+# numpy>=1.26.0                 # For vector operations
