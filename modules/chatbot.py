@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 from .database import DatabaseManager
-from .geospatial import GeospatialEngine
+from .geospatial import GeospatialEngine, SERVICE_LABELS
 from .ai_triage import AITriageEngine
 from .sms_fallback import SMSFallbackEngine
 
@@ -152,14 +152,35 @@ class RoadSoSChatbot:
         if not needed_types:
             needed_types = ["hospital", "police", "ambulance"]
 
-        # Fetch nearest services
-        services = self.geo.get_nearest_services(
+        # Fetch nearest services (returns {total_found, services})
+        result = self.geo.get_nearest_services(
             lat=self._lat,
             lon=self._lon,
             severity=severity,
             trauma_only=(severity == "critical"),
             limit=5,
         )
+        services = result["services"]
+        total_found = result["total_found"]
+
+        # ── Augment with offline semantic RAG search ───────────────────
+        try:
+            semantic_result = self.db.query_semantic_services(
+                query_text=description,
+                lat=self._lat, lon=self._lon,
+                limit=3,
+            )
+            seen_ids = {s.get("id") for s in services}
+            for sr in semantic_result["services"]:
+                sid = sr.get("service_id") or sr.get("id")
+                if sid and sid not in seen_ids:
+                    sr["label"] = SERVICE_LABELS.get(
+                        sr.get("service_type", ""), sr.get("service_type", "")
+                    )
+                    services.append(sr)
+                    seen_ids.add(sid)
+        except Exception:
+            pass  # Semantic search is best-effort augmentation
 
         # Build response
         severity_banners = {
@@ -174,7 +195,9 @@ class RoadSoSChatbot:
             banner,
             f"\n📋 Assessment: {triage.get('summary', description[:80])}",
             "\n🔎 Nearest Emergency Services:\n",
-            self.geo.format_services_for_display(services, self._lat, self._lon),
+            self.geo.format_services_for_display(
+                services, self._lat, self._lon, total_found=total_found
+            ),
         ]
 
         if severity in ("critical", "high"):
@@ -215,27 +238,51 @@ class RoadSoSChatbot:
             types = None
             label = "emergency services"
 
-        services = self.geo.db.query_rtree_bbox(
+        result = self.geo.db.query_rtree_bbox(
             lat=self._lat, lon=self._lon,
             service_types=types, limit=5,
         )
+        services = result["services"]
+        total_found = result["total_found"]
+
+        # ── Augment with offline semantic RAG search ───────────────────
+        try:
+            semantic_result = self.db.query_semantic_services(
+                query_text=query,
+                lat=self._lat, lon=self._lon,
+                limit=3,
+            )
+            seen_ids = {s.get("id") for s in services}
+            for sr in semantic_result["services"]:
+                sid = sr.get("service_id") or sr.get("id")
+                if sid and sid not in seen_ids:
+                    sr["label"] = SERVICE_LABELS.get(
+                        sr.get("service_type", ""), sr.get("service_type", "")
+                    )
+                    services.append(sr)
+                    seen_ids.add(sid)
+        except Exception:
+            pass  # Semantic search is best-effort augmentation
 
         if not services:
             return f"No {label} found within 25 km of your location in the offline database."
 
         header = f"📍 Nearest {label.title()} near you:\n"
-        return header + self.geo.format_services_for_display(services, self._lat, self._lon)
+        return header + self.geo.format_services_for_display(
+            services, self._lat, self._lon, total_found=total_found
+        )
 
     def _handle_sms_request(self) -> str:
         """Generate and queue an SMS fallback alert."""
         if not self._lat or not self._lon:
             return "Location required before sending SOS. Please share your GPS coordinates."
 
-        nearest = self.geo.db.query_rtree_bbox(
+        nearest_result = self.geo.db.query_rtree_bbox(
             lat=self._lat, lon=self._lon,
             service_types=["police"],
             limit=1,
         )
+        nearest = nearest_result["services"]
         nearest_name = nearest[0]["name"] if nearest else ""
 
         severity = self._last_triage.get("severity", "moderate") if self._last_triage else "moderate"

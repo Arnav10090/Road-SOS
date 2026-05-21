@@ -63,7 +63,7 @@ The application uses three core technologies working entirely on-device:
 
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
-| **AI Triage** | Qwen2.5-0.5B via Ollama + keyword fallback | Classifies incident severity, determines service needs |
+| **AI Triage** | Qwen3.5-0.8B via Ollama + keyword fallback | Classifies incident severity, determines service needs |
 | **Spatial DB** | SQLite R\*Tree + Haversine ranking | Sub-2ms offline proximity queries for emergency services |
 | **Geofencing** | OpenStreetMap + GeoPandas | Offline jurisdiction detection and global data coverage |
 
@@ -94,7 +94,7 @@ RoadSoS solves all four — for any country, on any network condition.
 - 📍 **Haversine-ranked results** — sorted by real great-circle distance, not just bounding box
 
 ### AI & Intelligence
-- 🧠 **On-device SLM Triage** — Qwen2.5-0.5B or Llama 3.2 1B via Ollama; zero cloud calls
+- 🧠 **On-device SLM Triage** — Qwen3.5-0.8B or Llama 3.2 1B via Ollama; zero cloud calls
 - 🔑 **Keyword Fallback Classifier** — 4-tier severity system (Critical / High / Moderate / Low); always available
 - 💬 **Natural Language Interface** — describe your emergency in plain text; AI handles the rest
 - 📦 **sqlite-vec Semantic Search** — vector embeddings stored as BLOBs for semantic RAG queries
@@ -125,7 +125,7 @@ RoadSoS solves all four — for any country, on any network condition.
 │                    AI TRIAGE ENGINE                             │
 │  ┌─────────────────────┐    ┌──────────────────────────────┐   │
 │  │  Ollama SLM         │    │  Keyword Classifier          │   │
-│  │  (Qwen2.5-0.5B)     │ OR │  (Zero dependencies,         │   │
+│  │  (Qwen3.5-0.8B)     │ OR │  (Zero dependencies,         │   │
 │  │  JSON schema output │    │   always available)          │   │
 │  └─────────────────────┘    └──────────────────────────────┘   │
 │           │                                                      │
@@ -231,7 +231,7 @@ roadsos/
 | Requirement | Notes |
 |------------|-------|
 | [Ollama](https://ollama.ai) | Enables on-device SLM triage. Without it, the keyword classifier handles triage automatically. |
-| 4 GB RAM | Minimum for Qwen2.5-0.5B (1.2 GB). 8 GB recommended for Llama 3.2 1B (2.5 GB). |
+| 4 GB RAM | Minimum for Qwen3.5-0.8B (1.6 GB). 8 GB recommended for Llama 3.2 1B (2.5 GB). |
 | GNSS/GPS hardware | Required for real location; simulation via manual coordinate input works without it. |
 
 ### Optional (for enhanced features)
@@ -314,11 +314,11 @@ curl -fsSL https://ollama.ai/install.sh | sh
 **Pull a model** (choose based on your available RAM):
 
 ```bash
-# Ultra-lightweight: ~600 MB download, ~1.2 GB RAM (recommended for most devices)
-ollama pull qwen2.5:0.5b
+# Ultra-lightweight: ~800 MB download, ~1.6 GB RAM (recommended for most devices)
+ollama pull qwen3.5:0.8b
 
-# More capable: ~900 MB download, ~1.8 GB RAM
-ollama pull qwen2.5:1.5b
+# More capable: ~1.2 GB download, ~2.0 GB RAM
+ollama pull qwen3.5:1.5b
 
 # Best quality: ~2.0 GB download, ~2.5 GB RAM
 ollama pull llama3.2:1b
@@ -653,8 +653,8 @@ Edit the `AITriageEngine` instantiation in `main.py`:
 
 ```python
 # In main.py, change the model_name parameter:
-triage_engine = AITriageEngine(model_name="qwen2.5:0.5b")   # ultralight
-triage_engine = AITriageEngine(model_name="qwen2.5:1.5b")   # balanced
+triage_engine = AITriageEngine(model_name="qwen3.5:0.8b")   # ultralight
+triage_engine = AITriageEngine(model_name="qwen3.5:1.5b")   # balanced
 triage_engine = AITriageEngine(model_name="llama3.2:1b")    # most capable
 ```
 
@@ -719,7 +719,7 @@ geojson = chatbot.export_geojson(incidents)
 | **Database** | SQLite 3 + R\*Tree module | Embedded, zero-config, cross-platform, <2ms spatial queries |
 | **Vector Search** | sqlite-vec extension | 384-dim vector BLOBs; replaces Pinecone/Weaviate with no cloud |
 | **Geospatial** | GeoPandas + Shapely | Offline GeoJSON polygon containment; no Google Maps API |
-| **AI Inference** | Ollama + Qwen2.5-0.5B | On-device SLM; 200+ language support; 262K context window |
+| **AI Inference** | Ollama + Qwen3.5-0.8B | On-device SLM; 200+ language support; 262K context window |
 | **Map Data** | OpenStreetMap (Overpass QL) | Free, global, crowdsourced; `amenity=hospital`, `craft=towing` etc. |
 | **API Server** | Flask 3.0 | Lightweight; REST endpoints for mobile and CoERS integration |
 | **SMS** | GSM / Android SmsManager | No data required; pure circuit-switched SMS |
@@ -736,7 +736,7 @@ Benchmarked on Intel Core i5 (CPU only, no GPU):
 | R-Tree bounding box query (23 services) | **< 2 ms** |
 | Haversine re-ranking (50 results) | **< 1 ms** |
 | Keyword triage classification | **< 0.1 ms** |
-| SLM triage via Ollama (Qwen2.5-0.5B) | **~800 ms** |
+| SLM triage via Ollama (Qwen3.5-0.8B) | **~800 ms** |
 | Full chatbot response (no SLM) | **< 5 ms** |
 | GeoJSON export (100 incidents) | **< 10 ms** |
 | Database initialization + seeding | **< 300 ms** |
@@ -762,7 +762,7 @@ curl http://localhost:11434/api/tags
 ollama serve
 
 # Pull a model if none installed
-ollama pull qwen2.5:0.5b
+ollama pull qwen3.5:0.8b
 ```
 Without Ollama, RoadSoS switches to keyword classifier automatically — no action needed.
 

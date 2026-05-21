@@ -34,6 +34,8 @@ def setup_database(db_path: str = "data/roadsos.db"):
     if not seeder.is_seeded():
         print("[RoadSoS] Seeding emergency services data from OSM extracts...")
         seeder.seed_all()
+        print("[RoadSoS] Building offline search index (RAG pipeline)...")
+        db.build_service_embeddings()
         print("[RoadSoS] Database seeding complete.")
     else:
         print("[RoadSoS] Existing database loaded.")

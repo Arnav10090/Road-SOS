@@ -58,25 +58,27 @@ class TestDatabase(unittest.TestCase):
 
     def test_rtree_query_nagpur(self):
         # Nagpur city center
-        results = self.db.query_rtree_bbox(21.1458, 79.0882, radius_km=20)
-        self.assertGreater(len(results), 0, "Should find services near Nagpur")
+        result = self.db.query_rtree_bbox(21.1458, 79.0882, radius_km=20)
+        self.assertGreater(len(result["services"]), 0, "Should find services near Nagpur")
+        self.assertGreater(result["total_found"], 0, "total_found should be > 0")
 
     def test_rtree_query_filter_by_type(self):
-        results = self.db.query_rtree_bbox(21.1458, 79.0882, service_types=["police"])
-        for r in results:
+        result = self.db.query_rtree_bbox(21.1458, 79.0882, service_types=["police"])
+        for r in result["services"]:
             self.assertEqual(r["service_type"], "police")
 
     def test_rtree_trauma_only(self):
-        results = self.db.query_rtree_bbox(21.1458, 79.0882, trauma_only=True)
-        for r in results:
+        result = self.db.query_rtree_bbox(21.1458, 79.0882, trauma_only=True)
+        for r in result["services"]:
             self.assertTrue(r["has_trauma"] or r["has_emergency"],
                             "Trauma-only query should only return trauma/emergency facilities")
 
     def test_rtree_returns_sorted_by_distance(self):
-        results = self.db.query_rtree_bbox(21.1458, 79.0882, radius_km=50)
-        if len(results) >= 2:
-            for i in range(len(results) - 1):
-                self.assertLessEqual(results[i]["distance_km"], results[i + 1]["distance_km"])
+        result = self.db.query_rtree_bbox(21.1458, 79.0882, radius_km=50)
+        services = result["services"]
+        if len(services) >= 2:
+            for i in range(len(services) - 1):
+                self.assertLessEqual(services[i]["distance_km"], services[i + 1]["distance_km"])
 
     def test_incident_logging(self):
         inc_id = self.db.log_incident(21.1458, 79.0882, "road_accident", "critical", "Test incident")
@@ -152,8 +154,10 @@ class TestGeospatial(unittest.TestCase):
         self.assertEqual(j["country_code"], "US")
 
     def test_nearest_services_returns_results(self):
-        services = self.geo.get_nearest_services(21.1458, 79.0882, severity="critical")
-        self.assertGreater(len(services), 0)
+        result = self.geo.get_nearest_services(21.1458, 79.0882, severity="critical")
+        self.assertGreater(len(result["services"]), 0)
+        self.assertIn("total_found", result)
+        self.assertGreater(result["total_found"], 0)
 
     def test_bearing_direction(self):
         # North should be ~N
@@ -163,9 +167,12 @@ class TestGeospatial(unittest.TestCase):
         self.assertEqual(d, "E")
 
     def test_format_display(self):
-        services = self.geo.get_nearest_services(21.1458, 79.0882)
-        formatted = self.geo.format_services_for_display(services, 21.1458, 79.0882)
+        result = self.geo.get_nearest_services(21.1458, 79.0882)
+        formatted = self.geo.format_services_for_display(
+            result["services"], 21.1458, 79.0882, total_found=result["total_found"]
+        )
         self.assertIn("km", formatted)
+        self.assertIn("identified", formatted.lower())
 
 
 class TestChatbot(unittest.TestCase):

@@ -241,11 +241,16 @@ class DatabaseManager:
         service_types: Optional[List[str]] = None,
         trauma_only: bool = False,
         limit: int = 20
-    ) -> List[Dict]:
+    ) -> Dict:
         """
         Core offline spatial query using R*Tree bounding box intersection.
         Converts radius_km to lat/lon deltas for bounding-box pre-filter,
         then computes Haversine distance for precise ranking.
+
+        Returns:
+            dict with keys:
+                - total_found (int): total services matching bbox + filters
+                - services (List[Dict]): top-N results sorted by Haversine distance
         """
         # Approx degree deltas for bounding box
         lat_delta = radius_km / 111.0
@@ -260,16 +265,28 @@ class DatabaseManager:
 
         # Build dynamic filter
         filters = ""
-        params = [min_lat, max_lat, min_lon, max_lon]
+        base_params = [min_lat, max_lat, min_lon, max_lon]
+        filter_params = []
         if service_types:
             placeholders = ",".join("?" * len(service_types))
             filters += f" AND es.service_type IN ({placeholders})"
-            params.extend(service_types)
+            filter_params.extend(service_types)
         if trauma_only:
             filters += " AND (es.has_trauma = 1 OR es.has_emergency = 1)"
 
-        params.append(limit * 3)  # Fetch extra for Haversine re-ranking
+        # ── Count total matching contacts in geofenced radius ──────────
+        count_params = base_params + filter_params
+        total_found = conn.execute(f"""
+            SELECT COUNT(*)
+            FROM emergency_services es
+            JOIN services_rtree rt ON es.id = rt.id
+            WHERE rt.min_lat >= ? AND rt.max_lat <= ?
+              AND rt.min_lon >= ? AND rt.max_lon <= ?
+              {filters}
+        """, count_params).fetchone()[0]
 
+        # ── Fetch rows for Haversine re-ranking (over-fetch for precision) ─
+        fetch_params = base_params + filter_params + [limit * 3]
         rows = conn.execute(f"""
             SELECT es.*
             FROM emergency_services es
@@ -278,7 +295,7 @@ class DatabaseManager:
               AND rt.min_lon >= ? AND rt.max_lon <= ?
               {filters}
             LIMIT ?
-        """, params).fetchall()
+        """, fetch_params).fetchall()
 
         # Haversine precise ranking
         results = []
@@ -290,7 +307,7 @@ class DatabaseManager:
             results.append(item)
 
         results.sort(key=lambda x: x["distance_km"])
-        return results[:limit]
+        return {"total_found": total_found, "services": results[:limit]}
 
     def log_incident(self, lat: float, lon: float, incident_type: str,
                      severity: str, description: str) -> int:
@@ -322,6 +339,199 @@ class DatabaseManager:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    # ── Offline Semantic / RAG Search ──────────────────────────────────
+
+    def query_semantic_services(
+        self,
+        query_text: str,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+        radius_km: float = 50.0,
+        limit: int = 10,
+    ) -> Dict:
+        """
+        Offline semantic (RAG) search over emergency services using sqlite-vec
+        vector embeddings or FTS5 full-text fallback.
+
+        Returns:
+            dict with keys:
+                - total_found (int): total semantically indexed services
+                - services (List[Dict]): results ranked by semantic relevance
+        """
+        conn = self.get_connection()
+        if self._vec_available:
+            return self._query_vec_services(conn, query_text, lat, lon, radius_km, limit)
+        return self._query_fts_services(conn, query_text, lat, lon, radius_km, limit)
+
+    def _query_vec_services(
+        self, conn: sqlite3.Connection, query_text: str,
+        lat: Optional[float], lon: Optional[float],
+        radius_km: float, limit: int,
+    ) -> Dict:
+        """Vector similarity search using sqlite-vec cosine distance."""
+        query_embedding = self._text_to_embedding(query_text)
+        query_blob = serialize_vector(query_embedding)
+
+        total = conn.execute("SELECT COUNT(*) FROM service_embeddings").fetchone()[0]
+        try:
+            rows = conn.execute("""
+                SELECT se.service_id, se.text_repr,
+                       vec_distance_cosine(se.embedding, ?) AS vec_distance,
+                       es.*
+                FROM service_embeddings se
+                JOIN emergency_services es ON se.service_id = es.id
+                ORDER BY vec_distance ASC
+                LIMIT ?
+            """, (query_blob, limit * 3)).fetchall()
+        except Exception as e:
+            print(f"[DB] sqlite-vec vector query failed: {e}; falling back to FTS5.")
+            return self._query_fts_services(conn, query_text, lat, lon, radius_km, limit)
+
+        results = []
+        for row in rows:
+            item = dict(row)
+            item["semantic_score"] = round(
+                1.0 - min(float(item.get("vec_distance", 1.0)), 1.0), 4
+            )
+            item["extra_tags"] = json.loads(item.get("extra_tags") or "{}")
+            if lat is not None and lon is not None:
+                item["distance_km"] = round(
+                    haversine_km(lat, lon, item["latitude"], item["longitude"]), 3
+                )
+            results.append(item)
+
+        # If location provided, re-rank by combined score (70% semantic, 30% proximity)
+        if lat is not None and lon is not None and results:
+            max_dist = max(r.get("distance_km", 1) for r in results) or 1
+            for r in results:
+                proximity = 1.0 - min(r.get("distance_km", max_dist) / max_dist, 1.0)
+                r["combined_score"] = round(
+                    0.7 * r["semantic_score"] + 0.3 * proximity, 4
+                )
+            results.sort(key=lambda x: x["combined_score"], reverse=True)
+
+        return {"total_found": total, "services": results[:limit]}
+
+    def _query_fts_services(
+        self, conn: sqlite3.Connection, query_text: str,
+        lat: Optional[float], lon: Optional[float],
+        radius_km: float, limit: int,
+    ) -> Dict:
+        """Full-text search fallback when sqlite-vec is not available."""
+        fts_terms = [w for w in query_text.lower().split() if len(w) > 2]
+        fts_query = " OR ".join(fts_terms) if fts_terms else query_text.lower()
+
+        try:
+            total = conn.execute("SELECT COUNT(*) FROM services_fts").fetchone()[0]
+            rows = conn.execute("""
+                SELECT sf.service_id, sf.text_repr, rank,
+                       es.*
+                FROM services_fts sf
+                JOIN emergency_services es ON CAST(sf.service_id AS INTEGER) = es.id
+                WHERE services_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+            """, (fts_query, limit * 3)).fetchall()
+        except Exception:
+            return {"total_found": 0, "services": []}
+
+        results = []
+        for row in rows:
+            item = dict(row)
+            item["semantic_score"] = round(
+                1.0 / (1.0 + abs(float(item.get("rank", 0)))), 4
+            )
+            item["extra_tags"] = json.loads(item.get("extra_tags") or "{}")
+            if lat is not None and lon is not None:
+                item["distance_km"] = round(
+                    haversine_km(lat, lon, item["latitude"], item["longitude"]), 3
+                )
+            results.append(item)
+
+        return {"total_found": total, "services": results[:limit]}
+
+    def build_service_embeddings(self) -> int:
+        """
+        Generate and store text embeddings for all emergency services.
+        Populates sqlite-vec embeddings or FTS5 index for the offline RAG pipeline.
+        Returns the number of services indexed.
+        """
+        conn = self.get_connection()
+        services = conn.execute("SELECT * FROM emergency_services").fetchall()
+        count = 0
+
+        for svc in services:
+            text_repr = (
+                f"{svc['name']} | {svc['service_type']} | "
+                f"{svc.get('sub_type') or ''} | "
+                f"{svc.get('address') or ''} | "
+                f"{svc.get('phone') or ''} | "
+                f"emergency={'yes' if svc.get('has_emergency') else 'no'} "
+                f"trauma={'yes' if svc.get('has_trauma') else 'no'}"
+            )
+
+            if self._vec_available:
+                embedding = self._text_to_embedding(text_repr)
+                conn.execute("""
+                    INSERT OR REPLACE INTO service_embeddings
+                    (service_id, embedding, text_repr) VALUES (?, ?, ?)
+                """, (svc["id"], serialize_vector(embedding), text_repr))
+            else:
+                conn.execute("""
+                    INSERT OR REPLACE INTO services_fts (service_id, text_repr)
+                    VALUES (?, ?)
+                """, (str(svc["id"]), text_repr))
+            count += 1
+
+        conn.commit()
+        print(f"[DB] Built search index for {count} services "
+              f"({'sqlite-vec vectors' if self._vec_available else 'FTS5 full-text'}).")
+        return count
+
+    def _text_to_embedding(self, text: str, dim: int = 384) -> List[float]:
+        """
+        Generate a text embedding vector for semantic search.
+        Primary: Ollama embedding API (on-device, offline-ready).
+        Fallback: Deterministic character n-gram hash embedding (zero dependencies).
+        """
+        try:
+            import urllib.request
+            payload = json.dumps({
+                "model": "qwen3.5:0.8b",
+                "prompt": text,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "http://localhost:11434/api/embeddings",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                emb = data.get("embedding", [])
+                if emb:
+                    return emb[:dim] + [0.0] * max(0, dim - len(emb))
+        except Exception:
+            pass
+        return self._hash_embedding(text, dim)
+
+    @staticmethod
+    def _hash_embedding(text: str, dim: int = 384) -> List[float]:
+        """
+        Deterministic hash-based embedding for offline vector search.
+        Uses character trigram hashing to produce a fixed-dimension vector.
+        Always available — zero external dependencies.
+        """
+        import hashlib
+        embedding = [0.0] * dim
+        text_lower = text.lower().strip()
+        for i in range(max(len(text_lower) - 2, 1)):
+            trigram = text_lower[i:i + 3]
+            h = int(hashlib.md5(trigram.encode()).hexdigest(), 16)
+            idx = h % dim
+            embedding[idx] += 1.0
+        magnitude = math.sqrt(sum(x * x for x in embedding)) or 1.0
+        return [x / magnitude for x in embedding]
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

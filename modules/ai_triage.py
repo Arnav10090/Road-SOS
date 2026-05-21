@@ -66,7 +66,7 @@ class AITriageEngine:
       2. Deterministic fallback: keyword-based classifier
     """
 
-    def __init__(self, model_name: str = "qwen2.5:0.5b", ollama_url: str = "http://localhost:11434"):
+    def __init__(self, model_name: str = "qwen3.5:0.8b", ollama_url: str = "http://localhost:11434"):
         self.model_name = model_name
         self.ollama_url = ollama_url
         self._ollama_available = self._check_ollama()

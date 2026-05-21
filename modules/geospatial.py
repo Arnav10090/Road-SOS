@@ -137,7 +137,7 @@ class GeospatialEngine:
         radius_km: float = 25.0,
         limit: int = 5,
         trauma_only: bool = False,
-    ) -> List[Dict]:
+    ) -> Dict:
         """
         Main proximity query - returns ranked list of nearest emergency services.
 
@@ -153,7 +153,7 @@ class GeospatialEngine:
         # For critical incidents, prefer trauma centers / hospitals with emergency=yes
         force_trauma = severity == "critical"
 
-        results = self.db.query_rtree_bbox(
+        bbox_result = self.db.query_rtree_bbox(
             lat=lat,
             lon=lon,
             radius_km=radius_km,
@@ -161,13 +161,17 @@ class GeospatialEngine:
             trauma_only=force_trauma,
             limit=limit * 4,  # Over-fetch for filtering
         )
+        results = bbox_result["services"]
+        total_found = bbox_result["total_found"]
 
         if not results and force_trauma:
             # Widen search if no trauma centers found
-            results = self.db.query_rtree_bbox(
+            bbox_result = self.db.query_rtree_bbox(
                 lat=lat, lon=lon, radius_km=radius_km * 2,
                 service_types=priority_types, trauma_only=False, limit=limit * 4
             )
+            results = bbox_result["services"]
+            total_found = bbox_result["total_found"]
 
         # Priority-rank: first by severity tier, then by distance
         def sort_key(item):
@@ -184,21 +188,31 @@ class GeospatialEngine:
                 bearing(lat, lon, r["latitude"], r["longitude"])
             )
 
-        return results[:limit]
+        return {"total_found": total_found, "services": results[:limit]}
 
-    def format_services_for_display(self, services: List[Dict], user_lat: float, user_lon: float) -> str:
+    def format_services_for_display(
+        self, services: List[Dict], user_lat: float, user_lon: float,
+        total_found: int = 0,
+    ) -> str:
         """Format service list into human-readable emergency response output."""
         if not services:
             return "No emergency services found in your area within the search radius."
 
         lines = []
+        if total_found > 0:
+            lines.append(
+                f"\U0001f4ca Successfully identified {total_found} emergency contact(s) "
+                f"within your geofenced jurisdiction. "
+                f"Displaying top {len(services)} nearest:"
+            )
+
         for i, svc in enumerate(services, 1):
-            phone_str = f" | ☎ {svc['phone']}" if svc.get("phone") else ""
+            phone_str = f" | \u260e {svc['phone']}" if svc.get("phone") else ""
             emergency_tag = " [EMERGENCY FACILITY]" if svc.get("has_emergency") or svc.get("has_trauma") else ""
             lines.append(
                 f"{i}. {svc.get('label', svc['service_type'])}{emergency_tag}\n"
                 f"   {svc['name']}\n"
-                f"   📍 {svc.get('distance_km', '?')} km {svc.get('directions_hint', '')}{phone_str}\n"
+                f"   \U0001f4cd {svc.get('distance_km', '?')} km {svc.get('directions_hint', '')}{phone_str}\n"
                 f"   {svc.get('address', 'Address not available')}"
             )
         return "\n\n".join(lines)
