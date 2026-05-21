@@ -94,6 +94,8 @@ class RoadSoSChatbot:
             loc_result = self._parse_location(text)
             if loc_result:
                 return loc_result
+            if self._awaiting_location:
+                return "❌ Location not found in the offline database. Please provide raw GPS coordinates (e.g., '21.14, 79.08') or a major landmark/hospital name."
 
         # Try to parse GPS coords directly
         coords = self._extract_coords(text)
@@ -307,21 +309,66 @@ class RoadSoSChatbot:
         )
 
     def _parse_location(self, text: str) -> Optional[str]:
-        """Try to extract GPS coordinates or resolve city name."""
+        """Try to extract GPS coordinates or resolve city/landmark name offline."""
+        # 1. Try to extract raw GPS coordinates first
         coords = self._extract_coords(text)
+        
+        # 2. If no coordinates found, fall back to the Offline Geocoder
+        if not coords:
+            coords = self._geocode_offline(text)
+            
         if coords:
             self._lat, self._lon = coords
             self._awaiting_location = False
+            
             # Now process any pending incident
             if self._last_incident:
                 incident = self._last_incident
                 self._last_incident = None
                 return (
-                    f"📍 Location set: {self._lat:.4f}, {self._lon:.4f}\n\n"
+                    f"📍 Location resolved: {self._lat:.4f}, {self._lon:.4f}\n\n"
                     + self._handle_emergency(incident)
                 )
-            return f"📍 Location set: {self._lat:.4f}, {self._lon:.4f}\n\nDescribe your situation or search for services."
+            return f"📍 Location resolved: {self._lat:.4f}, {self._lon:.4f}\n\nDescribe your situation or search for services."
+            
         # Could not parse location
+        return None
+
+    def _geocode_offline(self, text: str) -> Optional[Tuple[float, float]]:
+        """Attempt to resolve a place name to coordinates using the offline DB."""
+        # Clean up text (remove conversational filler)
+        clean_text = re.sub(r"\b(i am at|i'm at|my location is|near|at|in)\b", "", text, flags=re.IGNORECASE).strip()
+        
+        # Split by comma if user enters "Landmark, City" to isolate the main keyword
+        search_term = clean_text.split(',')[0].strip()
+        if len(search_term) < 3:
+            return None
+
+        conn = self.db.get_connection()
+        like_term = f"%{search_term}%"
+
+        # 1. Try matching against emergency services (Hospitals, Police Stations, Addresses)
+        try:
+            row = conn.execute(
+                "SELECT latitude, longitude FROM emergency_services WHERE name LIKE ? OR address LIKE ? LIMIT 1",
+                (like_term, like_term)
+            ).fetchone()
+            if row and row[0] and row[1]:
+                return float(row[0]), float(row[1])
+        except Exception:
+            pass
+
+        # 2. Try matching against administrative boundaries (Cities/Districts)
+        try:
+            row = conn.execute(
+                "SELECT centroid_lat, centroid_lon FROM admin_boundaries WHERE name LIKE ? LIMIT 1",
+                (like_term,)
+            ).fetchone()
+            if row and row[0] and row[1]:
+                return float(row[0]), float(row[1])
+        except Exception:
+            pass
+
         return None
 
     def _extract_coords(self, text: str) -> Optional[Tuple[float, float]]:

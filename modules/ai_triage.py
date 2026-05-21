@@ -135,12 +135,27 @@ class AITriageEngine:
                 data=payload,
                 headers={"Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            
+            # Increased timeout to 45 seconds to handle first-run CPU prefill
+            with urllib.request.urlopen(req, timeout=45) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 response_text = data.get("response", "")
+                
                 # Strip any markdown code fences
                 response_text = re.sub(r"```[a-z]*\n?", "", response_text).strip()
-                return json.loads(response_text)
+                
+                # Robust JSON extraction: Find the first '{' and last '}'
+                start_idx = response_text.find('{')
+                end_idx = response_text.rfind('}')
+                
+                if start_idx != -1 and end_idx != -1:
+                    clean_json = response_text[start_idx:end_idx+1]
+                    return json.loads(clean_json)
+                else:
+                    if not response_text.strip():
+                        raise ValueError("SLM generated an empty response.")
+                    return json.loads(response_text)
+                    
         except Exception as e:
             print(f"[Triage] SLM query failed: {e}. Falling back to keyword classifier.")
             return None
